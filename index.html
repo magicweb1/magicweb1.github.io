@@ -1,0 +1,235 @@
+ <!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Global Server Real-Time Gateway Live</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <style>
+    body { transition: background 0.3s, color 0.3s; }
+    .theme-dark { background: #1a202c; color: #e2e8f0; }
+    .theme-dark .bg-white { background: #2d3748; }
+    .theme-dark .text-gray-800 { color: #e2e8f0; }
+    .status-online { background: #34d399; color: #1a4731; }
+    .status-offline { background: #f87171; color: #4a1a1a; }
+    .error-alert { background: #fed7d7; color: #7f1d1d; padding: 10px; border-radius: 5px; }
+    .chart-container { max-width: 300px; margin: 0 auto; }
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-100 font-sans">
+  <header class="p-4 bg-white shadow-md theme-dark:bg-gray-800">
+    <div class="container mx-auto flex flex-col sm:flex-row justify-between items-center gap-2">
+      <h1 class="text-2xl font-bold text-gray-800 theme-dark:text-gray-200" id="title">Global Server Real-Time Gateway Live</h1>
+      <div class="flex flex-col sm:flex-row gap-2">
+        <input id="wsUrl" type="text" class="p-2 border rounded text-gray-800" value="ws://localhost:8080" placeholder="WebSocket URL">
+        <div class="flex gap-2">
+          <button onclick="toggleTheme()" class="p-2 bg-blue-500 text-white rounded hover:bg-blue-600">🌙 Dark</button>
+          <button onclick="toggleLang()" class="p-2 bg-blue-500 text-white rounded hover:bg-blue-600">🇮🇩 ID</button>
+          <button onclick="sendPing()" class="p-2 bg-blue-500 text-white rounded hover:bg-blue-600">🔄 Refresh</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container mx-auto p-4">
+    <div id="errorAlert" class="error-alert hidden mb-4"></div>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+      <div class="bg-white p-4 rounded-lg shadow status-card" id="onlineCard">
+        <h3 class="text-lg font-semibold">Status Server</h3>
+        <div class="text-2xl font-bold pulse" id="onlineStatus">Checking...</div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow status-card">
+        <h3 class="text-lg font-semibold">Penggunaan CPU</h3>
+        <div class="text-2xl font-bold" id="cpu">0%</div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow status-card">
+        <h3 class="text-lg font-semibold">Penggunaan Memory</h3>
+        <div class="text-2xl font-bold" id="memory">0%</div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow status-card">
+        <h3 class="text-lg font-semibold">Waktu Aktif</h3>
+        <div class="text-2xl font-bold" id="uptime">0s</div>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="bg-white p-4 rounded-lg shadow">
+        <h3 class="text-lg font-semibold">Tren Penggunaan CPU</h3>
+        <div class="chart-container">
+          <canvas id="cpuChart"></canvas>
+        </div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow">
+        <h3 class="text-lg font-semibold">Tren Penggunaan Memory</h3>
+        <div class="chart-container">
+          <canvas id="memoryChart"></canvas>
+        </div>
+      </div>
+    </div>
+    <div id="customText" class="mt-4 italic text-gray-600 theme-dark:text-gray-400"></div>
+  </main>
+
+  <footer class="p-4 text-center text-gray-600 theme-dark:text-gray-400">
+    Real-time global gateway. Tambah ?msg=teks-kamu untuk pesan custom. WS: <code id="wsUrlDisplay">ws://localhost:8080</code>
+  </footer>
+
+  <script>
+    let ws, reconnectAttempts = 0, maxAttempts = 5, pollingInterval;
+    const translations = {
+      id: { title: 'Global Server Real-Time Gateway Live', status: 'Status Server', online: 'Online', offline: 'Offline', cpu: 'Penggunaan CPU', memory: 'Penggunaan Memory', uptime: 'Waktu Aktif', error: 'Server tidak tersedia. Cek URL atau status server.' },
+      en: { title: 'Global Real-Time Server Gateway Live', status: 'Server Status', online: 'Online', offline: 'Offline', cpu: 'CPU Usage', memory: 'Memory Usage', uptime: 'Uptime', error: 'Server unavailable. Check URL or server status.' }
+    };
+    let currentLang = 'id';
+    const cpuData = [], memoryData = [], maxDataPoints = 20;
+
+    // Chart.js setup
+    const cpuChart = new Chart(document.getElementById('cpuChart').getContext('2d'), {
+      type: 'line', data: { labels: [], datasets: [{ label: 'CPU (%)', data: cpuData, borderColor: '#34d399', fill: false }] },
+      options: { scales: { y: { beginAtZero: true, max: 100 } }, animation: { duration: 500 } }
+    });
+    const memoryChart = new Chart(document.getElementById('memoryChart').getContext('2d'), {
+      type: 'line', data: { labels: [], datasets: [{ label: 'Memory (%)', data: memoryData, borderColor: '#3b82f6', fill: false }] },
+      options: { scales: { y: { beginAtZero: true, max: 100 } }, animation: { duration: 500 } }
+    });
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+
+    function displayCustomMessage() {
+      const params = new URLSearchParams(window.location.search);
+      const msg = params.get('msg');
+      const customText = document.getElementById('customText');
+      if (msg) {
+        customText.innerHTML = escapeHtml(msg.slice(0, 200) + (msg.length > 200 ? '…' : ''));
+      }
+    }
+
+    function updateStatus(status, text, error = '') {
+      const card = document.getElementById('onlineCard');
+      const metric = document.getElementById('onlineStatus');
+      card.className = `bg-white p-4 rounded-lg shadow status-card status-${status}`;
+      metric.textContent = text;
+      metric.classList.toggle('pulse', status === 'offline');
+      const errorAlert = document.getElementById('errorAlert');
+      errorAlert.textContent = error;
+      errorAlert.classList.toggle('hidden', !error);
+      if (status === 'offline' && !error && Notification.permission === 'granted') {
+        new Notification('Server Offline', { body: translations[currentLang].error });
+      }
+    }
+
+    function updateCharts(cpu, memory) {
+      const time = new Date().toLocaleTimeString('id-ID', { hour12: false });
+      cpuData.push(cpu); memoryData.push(memory);
+      if (cpuData.length > maxDataPoints) { cpuData.shift(); memoryData.shift(); }
+      cpuChart.data.labels = Array(cpuData.length).fill().map((_, i) => time);
+      memoryChart.data.labels = cpuChart.data.labels;
+      cpuChart.data.datasets[0].data = cpuData;
+      memoryChart.data.datasets[0].data = memoryData;
+      cpuChart.update(); memoryChart.update();
+    }
+
+    function connectWebSocket() {
+      const wsUrl = document.getElementById('wsUrl').value || 'ws://localhost:8080';
+      document.getElementById('wsUrlDisplay').textContent = wsUrl;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log('Connected to global gateway:', wsUrl);
+        updateStatus('online', translations[currentLang].online);
+        reconnectAttempts = 0;
+        clearInterval(pollingInterval);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'statusUpdate' || data.type === 'welcome') {
+            updateStatus('online', translations[currentLang].online);
+            document.getElementById('cpu').textContent = data.data.cpu.toFixed(1) + '%';
+            document.getElementById('memory').textContent = data.data.memory.toFixed(1) + '%';
+            document.getElementById('uptime').textContent = data.data.uptime + 's';
+            updateCharts(data.data.cpu, data.data.memory);
+          }
+        } catch (e) {
+          console.error('Invalid message:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        updateStatus('offline', translations[currentLang].offline, translations[currentLang].error);
+        if (reconnectAttempts < maxAttempts) {
+          setTimeout(connectWebSocket, Math.pow(2, reconnectAttempts) * 1000);
+          reconnectAttempts++;
+        } else {
+          startPolling();
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket Error:', error);
+        updateStatus('offline', translations[currentLang].offline, translations[currentLang].error);
+      };
+    }
+
+    function startPolling() {
+      clearInterval(pollingInterval);
+      pollingInterval = setInterval(async () => {
+        try {
+          const response = await fetch('/status', {
+            method: 'POST', // Support POST request
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ check: true })
+          });
+          if (response.ok) {
+            const data = await response.json();
+            updateStatus('online', translations[currentLang].online);
+            document.getElementById('cpu').textContent = data.cpu.toFixed(1) + '%';
+            document.getElementById('memory').textContent = data.memory.toFixed(1) + '%';
+            document.getElementById('uptime').textContent = data.uptime + 's';
+            updateCharts(data.cpu, data.memory);
+          } else {
+            throw new Error('Polling failed');
+          }
+        } catch (e) {
+          updateStatus('offline', translations[currentLang].offline, translations[currentLang].error);
+          // Simulasi data lokal jika server mati total
+          updateCharts(Math.random() * 100, Math.random() * 80);
+        }
+      }, 3000); // Polling cepat setiap 3 detik
+    }
+
+    function sendPing() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      } else {
+        connectWebSocket();
+      }
+    }
+
+    function toggleTheme() {
+      document.body.classList.toggle('theme-dark');
+      document.querySelector('button[onclick="toggleTheme()"]').textContent = document.body.classList.contains('theme-dark') ? '☀️ Light' : '🌙 Dark';
+    }
+
+    function toggleLang() {
+      currentLang = currentLang === 'id' ? 'en' : 'id';
+      document.getElementById('title').textContent = translations[currentLang].title;
+      document.querySelectorAll('.status-card h3')[0].textContent = translations[currentLang].status;
+      document.querySelectorAll('.status-card h3')[1].textContent = translations[currentLang].cpu;
+      document.querySelectorAll('.status-card h3')[2].textContent = translations[currentLang].memory;
+      document.querySelectorAll('.status-card h3')[3].textContent = translations[currentLang].uptime;
+      document.querySelector('button[onclick="toggleLang()"]').textContent = currentLang === 'en' ? '🇺🇸 EN' : '🇮🇩 ID';
+      updateStatus(document.getElementById('onlineStatus').textContent.includes('Online') ? 'online' : 'offline', translations[currentLang][document.getElementById('onlineStatus').textContent.includes('Online') ? 'online' : 'offline']);
+    }
+
+    // Inisialisasi otomatis
+    if (Notification.permission !== 'granted') Notification.requestPermission();
+    displayCustomMessage();
+    connectWebSocket();
+  </script>
+</body>
+</html>
